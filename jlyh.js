@@ -135,8 +135,8 @@ class UserInfo {
             vehicleLocationStatus: {
                 name: '位置信息',
                 fields: {
-                    longitude: { name: '经度', format: v => (v / 10000000).toFixed(6) },
-                    latitude: { name: '纬度', format: v => (v / 10000000).toFixed(6) },
+                    longitude: { name: '经度', format: v => (v / 3600000).toFixed(6) },
+                    latitude: { name: '纬度', format: v => (v / 3600000).toFixed(6) },
                     altitude: { name: '海拔', format: v => `${v}米` }
                 }
             },
@@ -1317,8 +1317,8 @@ class UserInfo {
                 pm25: this.vehicleStatus.vehicleEnvironmentStatus?.interiorPM25Level,
                 mileage: Math.round(this.vehicleStatus.basicVehicleStatus?.odometer),
                 range: this.vehicleStatus.basicVehicleStatus?.distanceToEmptyOnBatteryOnly,
-                longitude: parseFloat((this.vehicleStatus.vehicleLocationStatus?.longitude / 10000000).toFixed(6)),
-                latitude: parseFloat((this.vehicleStatus.vehicleLocationStatus?.latitude / 10000000).toFixed(6)),
+                longitude: parseFloat((this.vehicleStatus.vehicleLocationStatus?.longitude / 3600000).toFixed(6)),
+                latitude: parseFloat((this.vehicleStatus.vehicleLocationStatus?.latitude / 3600000).toFixed(6)),
                 charging_time: this.vehicleStatus.vehicleBatteryStatus?.timeToFullyCharged === '2047' ? 0 : parseFloat((this.vehicleStatus.vehicleBatteryStatus?.timeToFullyCharged / 60).toFixed(1)),
                 // 使用统一的状态检测方法
                 sentry_mode: this.checkStatus('sentry'),
@@ -1342,12 +1342,15 @@ class UserInfo {
             const locationData = {
                 latitude: sensorData.latitude,
                 longitude: sensorData.longitude,
-                gps_accuracy: 0
+                gps_accuracy: 100,
+                battery_level: sensorData.battery
             };
             const locationTopic = `homeassistant/device_tracker/geely_${this.vehicleInfo.vin}/state`;
-            await this.sendMqttMessage(locationTopic, JSON.stringify(locationData));
+            // 直接发送对象，不要再次使用 JSON.stringify
+            await this.sendMqttMessage(locationTopic, locationData);
 
-            // 添加设备追踪器配置
+
+            // 设备追踪器配置
             const deviceTrackerConfig = {
                 name: "车辆位置",
                 unique_id: `geely_${this.vehicleInfo.vin}_tracker`,
@@ -1365,9 +1368,10 @@ class UserInfo {
                 }
             };
 
-            // 发送设备追踪器配置
+            // 发送设备追踪器配置时，确保 payload 是 JSON 格式
             const trackerConfigTopic = `homeassistant/device_tracker/geely_${this.vehicleInfo.vin}/config`;
-            await this.sendMqttMessage(trackerConfigTopic, deviceTrackerConfig);
+            await this.sendMqttMessage(trackerConfigTopic, JSON.stringify(deviceTrackerConfig));
+
 
             // 添加传感器配置
             const sensorConfigs = {
