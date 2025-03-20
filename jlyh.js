@@ -1370,7 +1370,7 @@ class UserInfo {
 
             // 发送设备追踪器配置时，确保 payload 是 JSON 格式
             const trackerConfigTopic = `homeassistant/device_tracker/geely_${this.vehicleInfo.vin}/config`;
-            await this.sendMqttMessage(trackerConfigTopic, JSON.stringify(deviceTrackerConfig));
+            await this.sendMqttMessage(trackerConfigTopic, deviceTrackerConfig);
 
 
             // 添加传感器配置
