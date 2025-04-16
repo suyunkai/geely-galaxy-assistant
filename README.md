@@ -20,6 +20,7 @@
   - 方式一：抓取 `https://galaxy-user-api.geely.com/api/v1/login/refresh?refreshToken=` 后面的值
   - 方式二：抓取短信登录包 `https://galaxy-user-api.geely.com/api/v1/login/mobileCodeLogin` 返回体中的 refreshToken 值
   - 两种方式都需要加上 `&` 和请求头 headers 中的 deviceSN 值
+  - 经测试，如果是安卓，新版本app不root好像无法抓这个包了，可以用老版本（我用1.26.1版本测试的），勉强还能抓到（估计是https的证书验证不彻底）。
 
 > **注意**：
 > - 吉利银河 app 异地登录会互相顶掉，每次重新登录都需要重新抓包
