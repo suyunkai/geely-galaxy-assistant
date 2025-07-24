@@ -57,11 +57,11 @@ let msg = "";
 
 // MQTT配置
 const mqttConfig = {
-    host: 'mqtt://192.168.0.2', // MQTT服务器地址
+    host: 'mqtt://192.168.0.5', // MQTT服务器地址
     port: 1883,                 // MQTT服务器端口
     username: '',               // MQTT用户名
     password: '',               // MQTT密码
-    clientId: `jlyh_${Math.random().toString(16).slice(3)}`, // 随机客户端ID
+    clientId: 'jlyh_geely_galaxy', // 固定客户端ID
     updateInterval: 60         // MQTT状态更新间隔，单位：秒
 };
 
@@ -77,6 +77,7 @@ class UserInfo {
         this.switchStatus = {};  // 用于存储所有功能开关状态
         this.vehicleInfo = {};   // 用于存储车辆信息
         this.vehicleStatus = {}; // 用于存储车辆状态信息
+        this.firstTokenRefresh = true; // 添加标记，用于跟踪是否是首次刷新token
         // 功能名称映射
         this.featureNames = {
             'sign': '签到',
@@ -105,16 +106,15 @@ class UserInfo {
         // 功能开关状态映射
         this.switchStatusNames = {
             'vstdModeStatus': { name: '哨兵模式' },
-            // 'strangerModeActive': { name: '陌生人预警' },
-            // 'campingModeActive': { name: '露营模式' },
-            // 'jouIntVal': { name: '智能巡航' },
-            // 'copActive': { name: '舒适泊车' },
-            // 'parkingComfortStatus': { name: '泊车舒适性' },
-            // 'ldacStatus': { name: '高清音频' },
-            // 'driftModeActive': { name: '漂移模式' },
-            // 'carLocatorStatUploadEn': { name: '车辆定位' },
-            // 'prkgCameraActive': { name: '泊车影像' }
-            // 注释无用功能，取消注释将显示在通知和日志里
+            'strangerModeActive': { name: '陌生人预警' },
+            'campingModeActive': { name: '露营模式' },
+            'jouIntVal': { name: '智能巡航' },
+            'copActive': { name: '舒适泊车' },
+            'parkingComfortStatus': { name: '泊车舒适性' },
+            'ldacStatus': { name: '高清音频' },
+            'driftModeActive': { name: '漂移模式' },
+            'carLocatorStatUploadEn': { name: '车辆定位' },
+            'prkgCameraActive': { name: '泊车影像' }
         };
         // 车辆信息映射
         this.vehicleInfoNames = {
@@ -126,10 +126,11 @@ class UserInfo {
         // 车辆状态映射
         this.vehicleStatusNames = {
             basicVehicleStatus: {
-                name: '基本状态',
+                name: '基础状态',
                 fields: {
                     distanceToEmptyOnBatteryOnly: { name: '续航里程', format: v => `${v}公里` },
-                    odometer: { name: '总里程', format: v => `${Math.round(v)}公里` }
+                    odometer: { name: '总里程', format: v => `${Math.round(v)}公里` },
+                    usageMode: { name: '使用模式', format: v => v === '1' ? '正常模式' : `模式${v}` }
                 }
             },
             vehicleLocationStatus: {
@@ -154,7 +155,10 @@ class UserInfo {
                     avgSpeed: { name: '近期平均速度', format: v => `${v}km/h` },
                     averPowerConsumption: { name: '近期平均能耗', format: v => `${v}kWh/100km` },
                     tripMeter1: { name: '行程1', format: v => `${v}km` },
-                    tripMeter2: { name: '行程2', format: v => `${v}km` }
+                    tripMeter2: { name: '行程2', format: v => `${v}km` },
+                    averTraPowerConsumption: { name: '行程平均能耗', format: v => `${v}kWh/100km` },
+                    electricParkBrakeStatus: { name: '电子手刹', format: v => v === 1 ? '启用' : '未启用' },
+                    gearAutoStatus: { name: '自动挡位', format: v => v }
                 }
             },
             
@@ -179,7 +183,14 @@ class UserInfo {
                 fields: {
                     doorLockStatusDriver: { name: '门锁', format: v => v === '2' ? '已锁定' : '已解锁' },
                     sunroofStatus: { name: '天窗状态', format: v => v === '1' ? '打开' : '关闭' },
-                    sunshadeStatus: { name: '遮阳帘状态', format: v => v === '1' ? '打开' : '关闭' }
+                    sunshadeStatus: { name: '遮阳帘状态', format: v => v === '1' ? '打开' : '关闭' },
+                    trunkLockStatus: { name: '后备箱锁', format: v => v === '1' ? '解锁' : '锁定' }
+                }
+            },
+            vehicleEngineStatus: {
+                name: '电机状态',
+                fields: {
+                    engineStatus: { name: '电机', format: v => v === 'engine-off' ? '关闭' : '开启' }
                 }
             },
             vehicleClimateStatus: {
@@ -522,12 +533,19 @@ class UserInfo {
                 headers: this.getGetHeader(204179735, `/api/v1/login/refresh?refreshToken=${this.refreshToken}`),
             },
                 result = await httpRequest(options);
-            // console.log(options);
-            // console.log(result);
+            
             if (result.code == 'success') {
-                console.log(`✅${result.message}: ${result.data.centerTokenDto.token} \n🆗刷新KEY:${result.data.centerTokenDto.refreshToken}`);
+                // 简化成功消息，不再输出token详情
                 this.ckStatus = true;
-                this.token = result.data.centerTokenDto.token
+                this.token = result.data.centerTokenDto.token;
+                
+                // 只在首次刷新token时显示日志
+                if (this.firstTokenRefresh) {
+                    const randomId = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
+                    $.DoubleLog(`✅接口调用成功: ${randomId}`);
+                    $.DoubleLog(`🆗刷新KEY:${result.data.centerTokenDto.refreshToken}`);
+                    this.firstTokenRefresh = false; // 标记已经不是首次刷新了
+                }
             } else {
                 $.DoubleLog(`❌ ${result.message}`);
                 this.ckStatus = false;
@@ -556,6 +574,9 @@ class UserInfo {
 
             if (result.code == 0) {
                 if (showInfoLogs) $.DoubleLog(`✅获取车辆基本信息成功！`);
+                // 显示原始返回信息
+                if (showInfoLogs) $.DoubleLog(`🔍车辆信息原始数据: ${JSON.stringify(result.data)}`);
+                
                 if (result.data && result.data.length > 0) {
                     this.vehicleInfo = result.data[0];  // 保存车辆信息
                     
@@ -605,6 +626,8 @@ class UserInfo {
 
             if (result.code == 0) {
                 if (showInfoLogs) $.DoubleLog(`✅查询车辆状态成功！`);
+                // 显示原始返回信息
+                if (showInfoLogs) $.DoubleLog(`🔍车辆状态原始数据: ${JSON.stringify(result.data)}`);
                 
                 // 保存车辆状态信息
                 this.vehicleStatus = result.data;
@@ -660,6 +683,8 @@ class UserInfo {
 
             if (result.code == 0) {
                 if (showInfoLogs) $.DoubleLog(`✅查询车辆功能开关成功！`);
+                // 显示原始返回信息
+                if (showInfoLogs) $.DoubleLog(`🔍功能开关原始数据: ${JSON.stringify(result.data)}`);
                 
                 // 保存所有功能开关状态
                 this.switchStatus = result.data;
@@ -1328,7 +1353,19 @@ class UserInfo {
                 purifier_state: this.checkStatus('purifier'),
                 sunroof_state: this.checkStatus('sunroof'),
                 sunshade_state: this.checkStatus('sunshade'),
-                ac_temp: this.acTemp || 25  // 添加空调温度状态
+                ac_temp: this.acTemp || 25,  // 添加空调温度状态
+                
+                // 添加新的状态字段
+                usage_mode: this.vehicleStatus.basicVehicleStatus?.usageMode,
+                current_speed: this.vehicleStatus.vehicleRunningStatus?.speed,
+                e_brake_status: this.vehicleStatus.vehicleRunningStatus?.electricParkBrakeStatus,
+                gear_status: this.vehicleStatus.vehicleRunningStatus?.gearAutoStatus,
+                trip_power_consumption: this.vehicleStatus.vehicleRunningStatus?.averTraPowerConsumption,
+                avg_power_consumption: this.vehicleStatus.vehicleRunningStatus?.averPowerConsumption,
+                
+                // 添加电机状态和后备箱锁状态
+                engine_status: this.vehicleStatus.vehicleEngineStatus?.engineStatus,
+                trunk_lock_status: this.vehicleStatus.vehicleDoorCoverStatus?.trunkLockStatus
             };
 
             // 保存最后的传感器数据用于后续更新
@@ -1349,7 +1386,6 @@ class UserInfo {
             // 直接发送对象，不要再次使用 JSON.stringify
             await this.sendMqttMessage(locationTopic, locationData);
 
-
             // 设备追踪器配置
             const deviceTrackerConfig = {
                 name: "车辆位置",
@@ -1362,7 +1398,7 @@ class UserInfo {
                 icon: "mdi:car",
                 device: {
                     identifiers: [`geely_${this.vehicleInfo.vin}`],
-                    name: "吉利汽车",
+                    name: "吉利银河",
                     model: this.vehicleInfo.seriesNameVs,
                     manufacturer: "Geely"
                 }
@@ -1371,7 +1407,6 @@ class UserInfo {
             // 发送设备追踪器配置时，确保 payload 是 JSON 格式
             const trackerConfigTopic = `homeassistant/device_tracker/geely_${this.vehicleInfo.vin}/config`;
             await this.sendMqttMessage(trackerConfigTopic, deviceTrackerConfig);
-
 
             // 添加传感器配置
             const sensorConfigs = {
@@ -1383,7 +1418,7 @@ class UserInfo {
                     unique_id: `geely_${this.vehicleInfo.vin}_temperature`,
                     device: {
                         identifiers: [`geely_${this.vehicleInfo.vin}`],
-                        name: "吉利汽车",
+                        name: "吉利银河",
                         model: this.vehicleInfo.seriesNameVs,
                         manufacturer: "Geely"
                     }
@@ -1456,6 +1491,82 @@ class UserInfo {
                     device: {
                         identifiers: [`geely_${this.vehicleInfo.vin}`]
                     }
+                },
+                // 添加新的传感器配置
+                usage_mode: {
+                    name: "使用模式",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.usage_mode }}",
+                    unique_id: `geely_${this.vehicleInfo.vin}_usage_mode`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                current_speed: {
+                    name: "当前车速",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.current_speed }}",
+                    unit_of_measurement: "km/h",
+                    unique_id: `geely_${this.vehicleInfo.vin}_current_speed`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                e_brake_status: {
+                    name: "电子手刹状态",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.e_brake_status }}",
+                    unique_id: `geely_${this.vehicleInfo.vin}_e_brake_status`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                gear_status: {
+                    name: "挡位状态",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.gear_status }}",
+                    unique_id: `geely_${this.vehicleInfo.vin}_gear_status`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                trip_power_consumption: {
+                    name: "行程平均能耗",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.trip_power_consumption }}",
+                    unit_of_measurement: "kWh/100km",
+                    unique_id: `geely_${this.vehicleInfo.vin}_trip_power_consumption`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                avg_power_consumption: {
+                    name: "近期平均能耗",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.avg_power_consumption }}",
+                    unit_of_measurement: "kWh/100km",
+                    unique_id: `geely_${this.vehicleInfo.vin}_avg_power_consumption`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                engine_status: {
+                    name: "电机状态",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.engine_status }}",
+                    unique_id: `geely_${this.vehicleInfo.vin}_engine_status`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                trunk_lock_status: {
+                    name: "后备箱锁状态",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.trunk_lock_status }}",
+                    unique_id: `geely_${this.vehicleInfo.vin}_trunk_lock_status`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
                 }
             };
 
@@ -1479,7 +1590,7 @@ class UserInfo {
                     unique_id: `geely_${this.vehicleInfo.vin}_ac_temp`,
                     device: {
                         identifiers: [`geely_${this.vehicleInfo.vin}`],
-                        name: "吉利汽车",
+                        name: "吉利银河",
                         model: this.vehicleInfo.seriesNameVs,
                         manufacturer: "Geely"
                     }
@@ -1506,7 +1617,7 @@ class UserInfo {
                     unique_id: `geely_${this.vehicleInfo.vin}_sentry`,
                     device: {
                         identifiers: [`geely_${this.vehicleInfo.vin}`],
-                        name: "吉利汽车",
+                        name: "吉利银河",
                         model: this.vehicleInfo.seriesNameVs,
                         manufacturer: "Geely"
                     }
@@ -1612,7 +1723,7 @@ class UserInfo {
                     unique_id: `geely_${this.vehicleInfo.vin}_rapidheat`,
                     device: {
                         identifiers: [`geely_${this.vehicleInfo.vin}`],
-                        name: "吉利汽车",
+                        name: "吉利银河",
                         model: this.vehicleInfo.seriesNameVs,
                         manufacturer: "Geely"
                     }
@@ -1665,7 +1776,7 @@ class UserInfo {
                 await this.sendMqttMessage(configTopic, config);
             }
 
-            $.DoubleLog(`✅车辆状态已发送到MQTT`);
+            // 删除成功日志，将由updateAndSendStatus统一输出
         } catch (e) {
             $.DoubleLog(`❌发送车辆状态到MQTT失败: ${e.message}`);
             console.log(e);
@@ -1676,7 +1787,11 @@ class UserInfo {
     async initMqtt() {
         try {
             if (this.mqttClient) {
-                return; // 如果已经有连接，直接返回
+                // 如果已经有连接，先断开旧连接
+                this.mqttClient.end(true);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                this.mqttClient = null;
+                $.DoubleLog(`🔄断开旧MQTT连接，准备重新连接`);
             }
 
             const mqtt = require('mqtt');
@@ -1686,9 +1801,16 @@ class UserInfo {
                 port: mqttConfig.port,
                 username: mqttConfig.username,
                 password: mqttConfig.password,
-                clientId: mqttConfig.clientId,
-                reconnectPeriod: 5000    // 重连间隔5秒
+                clientId: mqttConfig.clientId, // 固定使用配置中的客户端ID
+                reconnectPeriod: 5000,   // 重连间隔5秒
+                clean: true,             // 清除会话
+                connectTimeout: 10000,   // 连接超时时间
+                rejectUnauthorized: false // 不验证服务器证书
             };
+
+            // 输出连接信息
+            $.DoubleLog(`🔄正在连接MQTT服务器: ${mqttConfig.host}:${mqttConfig.port}`);
+            $.DoubleLog(`🔑使用客户端ID: ${mqttConfig.clientId}`);
 
             this.mqttClient = mqtt.connect(mqttConfig.host, connectConfig);
 
@@ -1721,7 +1843,7 @@ class UserInfo {
 
             // 重连事件
             this.mqttClient.on('reconnect', () => {
-                $.DoubleLog(`🔄MQTT正在重连...`);
+                $.DoubleLog(`🔄MQTT正在重连...使用客户端ID: ${mqttConfig.clientId}`);
             });
 
             // 错误处理
@@ -1738,6 +1860,12 @@ class UserInfo {
                     clearInterval(this.statusUpdateInterval);
                     this.statusUpdateInterval = null;
                 }
+            });
+            
+            // 连接结束事件
+            this.mqttClient.on('end', () => {
+                $.DoubleLog(`MQTT连接已结束`);
+                this.mqttClient = null;
             });
 
             // 消息处理（保持原有逻辑）
@@ -1954,6 +2082,8 @@ class UserInfo {
             // 刷新token
             await this.refresh_token();
             if (!this.ckStatus) {
+                // 在输出错误信息前先换行，以免覆盖状态行
+                process.stdout.write('');
                 $.DoubleLog(`❌账号CK失效，无法更新状态`);
                 return;
             }
@@ -1962,12 +2092,18 @@ class UserInfo {
             await this.getVehicleInfo();
             // 发送状态到MQTT
             await this.sendVehicleStatusMqtt();
-            $.DoubleLog(`✅获取车辆信息成功`);
+            
+            // 使用 process.stdout.write 和 '\r' 实现单行更新日志
+            const currentTime = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Shanghai', hour12: false }).replace(',', '').slice(0, 16).replace(/-/g, '/');
+            process.stdout.write(`✅ ${currentTime} 车辆状态已更新并发送到MQTT\r`);
         } catch (e) {
+            // 在输出错误信息前先换行，以免覆盖状态行
+            process.stdout.write('');
             $.DoubleLog(`❌获取车辆信息失败: ${e.message}`);
             console.log(e);
         }
     }
+
 
     // 添加统一的状态检测方法
     checkStatus(type) {
