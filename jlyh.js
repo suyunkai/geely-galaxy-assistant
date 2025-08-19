@@ -2,7 +2,7 @@
  * 吉利银河青龙脚本
  * 可实现查询信息、打开哨兵、签到、查询积分等功能
  * 支持MQTT服务，可接入HomeAssistant
- * 需要依赖：mqtt
+ * 需要依赖：mqtt、	got@11.8.6、tough-cookie、	crypto-js
  * 作者微信：greenteacher46 加微信说明来意，不接受免费咨询，可交流技术
 
  * 使用方法：
