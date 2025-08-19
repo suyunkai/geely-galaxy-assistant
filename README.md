@@ -9,7 +9,7 @@
 - 支持 MQTT 服务，可接入 HomeAssistant
 
 ## 依赖要求
-- mqtt
+- mqtt、	got@11.8.6、tough-cookie、	crypto-js
 
 ## 使用说明
 
