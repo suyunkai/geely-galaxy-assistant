@@ -2,7 +2,7 @@
  * 吉利银河青龙脚本
  * 可实现查询信息、打开哨兵、签到、查询积分等功能
  * 支持MQTT服务，可接入HomeAssistant
- * 需要依赖：mqtt、	got@11.8.6、tough-cookie、	crypto-js
+ * 需要依赖：mqtt
  * 作者微信：greenteacher46 加微信说明来意，不接受免费咨询，可交流技术
 
  * 使用方法：
@@ -26,6 +26,7 @@
  *    - jlyh.js info 将只执行信息获取功能
  *    - jlyh.js sign 将只执行签到功能
  *    - jlyh.js opensentry 将执行打开哨兵功能
+ *    - jlyh.js photo 将获取驻车图片
  *    - jlyh.js sign opensentry 将执行签到和哨兵功能
  
  * 3. 通知控制
@@ -47,17 +48,23 @@
 // *********************************************************
 // 各类变量的构造
 
-let Notify = 0; 
-let defaultRunAll = false;  // 默认执行模式：false 表示默认只执行信息获取，true 表示默认执行所有功能
+let Notify = 0;
+let defaultRunAll = false;  // 默认执行模式：false 表示使用 defaultFeatures 配置，true 表示执行所有功能
+let defaultFeatures = ['info', 'photo'];  // 当 defaultRunAll=false 时，默认执行的功能列表，可配置多个，如：['info', 'sign', 'opensentry']
 let defaultEnableMqtt = true; // 默认MQTT模式：false 表示默认不启动MQTT监听，true 表示默认启动
 let showInfoLogs = false; // 控制是否在执行功能时显示信息获取相关的日志，默认如果执行功能则不显示
 const ckName = "jlyh";
 const $ = new Env("吉利银河");
 let msg = "";
 
+// 添加时间格式化函数
+function getFormattedTimestamp() {
+    return new Date().toLocaleString('en-GB', { timeZone: 'Asia/Shanghai', hour12: false }).replace(',', '').slice(0, 16).replace(/-/g, '/');
+}
+
 // MQTT配置
 const mqttConfig = {
-    host: 'mqtt://192.168.0.5', // MQTT服务器地址
+    host: 'mqtt://192.168.0.2', // MQTT服务器地址
     port: 1883,                 // MQTT服务器端口
     username: '',               // MQTT用户名
     password: '',               // MQTT密码
@@ -100,7 +107,8 @@ class UserInfo {
             'aconopen': '打开空调',
             'aconclose': '关闭空调',
             'rapidheat': '极速升温',
-            'rapidcool': '极速降温'
+            'rapidcool': '极速降温',
+            'photo': '获取驻车图片'
             // 如果要新增功能，在这里添加新功能的映射即可,不添加则会直接显示函数名
         };
         // 功能开关状态映射
@@ -237,27 +245,19 @@ class UserInfo {
     }
 
     // 请求头加密参数处理
-    calculateHmacSha256(method, accept, content_md5, content_type, date, key, nonce, timestamp, path) {
+    calculateHmacSha256(method, accept, content_md5, content_type, date, key, nonce, timestamp, path, appcode = null) {
         const crypto = require('crypto');
         // 构建待加密的字符串
-        let e = `POST\n` +// method
-            `application/json; charset=utf-8\n` +// accept
-            `9qH9eCwn+tkcAKIMmnzdnQ==\n` +// content_md5
-            `application/json; charset=utf-8\n` +// content_type
-            `Thu, 13 Jul 2023 01:27:46 GMT\n` +// date
-            `x-ca-key:204453306\n` +
-            `x-ca-nonce:a2b33525-ca82-4e3a-b7ff-643f1775a999\n` +// nonce
-            `x-ca-timestamp:1689211666058\n` +// timestamp
-            `/app/v1/version/checkVersion`// path
         let ee = `${method}\n` +// method
             `${accept}\n` +// accept
             `${content_md5}\n` +// content_md5
             `${content_type}\n` +// content_type
             `${date}\n` +// date
+            (appcode ? `x-ca-appcode:${appcode}\n` : '') + // 如果有appcode则添加
             `x-ca-key:${key}\n` +
             `x-ca-nonce:${nonce}\n` +// nonce
             `x-ca-timestamp:${timestamp}\n` +// timestamp
-            `${path}`// path  
+            `${path}`// path
         // console.log(ee);
 
         // app的Key对应的不同加密编码
@@ -273,7 +273,7 @@ class UserInfo {
         } else if (key == 204179735) {
             sercetKey = `UhmsX3xStU4vrGHGYtqEXahtkYuQncMf`
         }
-        // 生成 HMAC-SHA256 加密结果  
+        // 生成 HMAC-SHA256 加密结果
         const hmacSha256 = crypto.createHmac('sha256', sercetKey);
         hmacSha256.update(ee);
         const encryptedData = hmacSha256.digest();
@@ -321,11 +321,24 @@ class UserInfo {
         // console.log(timestamp);
         let content_md5 = calculateContentMD5(body);
         let uuid = this.generateUUID();
-        let signature = this.calculateHmacSha256("POST", "application/json; charset=utf-8", content_md5, "application/json; charset=utf-8", formattedDate, key, uuid, timestamp, path)
+
+        // 根据不同的key设置不同的签名头字段
+        let signatureHeaders;
+        if (key == 204373120) {
+            // vc域名使用这个签名头
+            signatureHeaders = 'x-ca-appcode,x-ca-nonce,x-ca-timestamp,x-ca-key';
+        } else {
+            // 其他域名使用这个签名头
+            signatureHeaders = 'x-ca-nonce,x-ca-key,x-ca-timestamp';
+        }
+
+        // Determine appcode based on key for signature calculation
+        let appcode = key == 204373120 ? 'usp-gateway-code' : null;
+        let signature = this.calculateHmacSha256("POST", "application/json; charset=utf-8", content_md5, "application/json; charset=utf-8", formattedDate, key, uuid, timestamp, path, appcode)
         let headers = {
             'date': formattedDate,
             'x-ca-signature': signature,
-            'x-ca-appcode': 'SWGeelyCode',
+            'x-ca-appcode': key == 204373120 ? 'usp-gateway-code' : 'SWGeelyCode',
             'x-ca-nonce': uuid,
             'x-ca-key': key,
             'ca_version': 1,
@@ -333,14 +346,14 @@ class UserInfo {
             'usetoken': 1,
             'content-md5': content_md5,
             'x-ca-timestamp': timestamp,
-            'x-ca-signature-headers': 'x-ca-nonce,x-ca-timestamp,x-ca-key',
+            'x-ca-signature-headers': signatureHeaders,
             'x-refresh-token': true,
             'user-agent': 'ALIYUN-ANDROID-UA',
             'token': this.token,
             'deviceSN': this.deviceSN,
             'txCookie': '',
             'appId': 'galaxy-app',
-            'appVersion': '1.27.0',
+            'appVersion': '1.39.0',
             'platform': 'Android',
             'Cache-Control': 'no-cache',
             'sweet_security_info': '{"appVersion":"1.27.0","platform":"android"}' ,
@@ -350,9 +363,10 @@ class UserInfo {
            'Content-Length': '87',
             'Connection': 'Keep-Alive',
             'Accept-Encoding': 'gzip',
- 
-            
+
         }
+
+
         if (key == 204179735) {
             // 安卓端
             headers["usetoken"] = true
@@ -360,6 +374,11 @@ class UserInfo {
             delete headers["x-refresh-token"]
             headers["taenantid"] = 569001701001
             headers["svcsid"] = ""
+        } else if (key == 204373120) {
+            // vc域名(驻车图片等功能)
+            headers["usetoken"] = 1
+            headers["host"] = `galaxy-vc.geely.com`
+            headers["x-refresh-token"] = true
         } else {
             // h5端
             headers["usetoken"] = 1
@@ -399,13 +418,14 @@ class UserInfo {
             'deviceSN': this.deviceSN,
             'txCookie': '',
             'appId': 'galaxy-app',
-            'appVersion': '1.27.0',
+            'appVersion': '1.39.0',
             'platform': 'Android',
             'Cache-Control': 'no-cache',
             'Connection': 'Keep-Alive',
             'Accept-Encoding': 'gzip',
             
         }
+
         if (key == 204179735) {
             // 安卓端
             headers["usetoken"] = true
@@ -427,25 +447,32 @@ class UserInfo {
      * -------主函数-------
      */
     async main(features = []) {
-        $.DoubleLog(`⌛️ ${new Date().toLocaleString('en-GB', { timeZone: 'Asia/Shanghai', hour12: false }).replace(',', '').slice(0, 16).replace(/-/g, '/')}`);
+        $.DoubleLog(`⌛️ ${getFormattedTimestamp()}`);
+
+        // 如果没有传入参数，使用默认配置
+        if (features.length === 0) {
+            if (defaultRunAll) {
+                features = ['all'];  // 执行所有功能
+            } else {
+                features = defaultFeatures;  // 使用配置的默认功能列表
+            }
+        }
+
+        // 从功能列表中过滤掉 'info'，因为它不是一个执行函数，而是用于控制日志显示
+        const hasInfo = features.includes('info');
+        features = features.filter(f => f !== 'info');
+
         // 设置是否显示信息获取日志
-        showInfoLogs = this.shouldShowInfoLogs(features);
+        showInfoLogs = hasInfo || features.length === 0;
         // 检查是否需要启动MQTT
         const isMqttMode = features.length === 0 ? defaultEnableMqtt : features.length === 1 && features.includes('mqtt');
-        // 如果参数包含info，则只执行信息获取
-        if (features.includes('info')) {
-            features = [];  // 清空功能列表，只执行信息获取
-        }
-        // 否则，按照defaultRunAll的设置处理
-        else if (features.length === 0 && defaultRunAll) {
-            features = ['all'];
-        }
+
         // 显示运行功能说明
         this.logRunningFeatures(features);
         // 刷新token并获取基本信息
         await this.refresh_token();
         if (!this.ckStatus) {
-            $.DoubleLog(`❌账号CK失效`);
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 账号CK失效`);
             Notify = 1;
             return;
         }
@@ -456,7 +483,7 @@ class UserInfo {
             await this.initMqtt();
             // 保持脚本运行
             return new Promise(() => {
-                $.DoubleLog(`✅MQTT监听已启动，等待命令中...`);
+                $.DoubleLog(`✅ ${getFormattedTimestamp()} MQTT监听已启动，等待命令中...`);
             });
         }
         // 执行功能
@@ -466,15 +493,15 @@ class UserInfo {
     // 记录运行的功能
     logRunningFeatures(features) {
         if (features.length === 0) {
-            $.DoubleLog(`🔄 正在获取车辆信息`);
+            $.DoubleLog(`🔄 ${getFormattedTimestamp()} 正在获取车辆信息`);
         } else if (features.includes('all')) {
-            $.DoubleLog(`🔄 正在运行全部功能`);
+            $.DoubleLog(`🔄 ${getFormattedTimestamp()} 正在运行全部功能`);
         } else {
             const runningFeatures = features
                 .map(f => this.featureNames[f.toLowerCase()] || f)
                 .filter(name => name);
             if (runningFeatures.length > 0) {
-                $.DoubleLog(`🔄 正在运行${runningFeatures.join('、')}功能`);
+                $.DoubleLog(`🔄 ${getFormattedTimestamp()} 正在运行${runningFeatures.join('、')}功能`);
             }
         }
     }
@@ -497,7 +524,7 @@ class UserInfo {
         }
         $.DoubleLog(`🚗🚗🚗🚗🚗🚗🚗🚗🚗🚗`);
         if (features.includes('all')) {
-            $.DoubleLog(`🔄 正在执行所有功能...`);
+            $.DoubleLog(`🔄 ${getFormattedTimestamp()} 正在执行所有功能...`);
             await this.sign();
             await this.opensentry();
             // 只在MQTT启用时发送状态
@@ -505,7 +532,7 @@ class UserInfo {
                 await this.sendVehicleStatusMqtt();
             }
         } else {
-            $.DoubleLog(`🔄 正在执行功能...`);
+            $.DoubleLog(`🔄 ${getFormattedTimestamp()} 正在执行功能...`);
             for (const feature of features) {
                 const methodName = feature.toLowerCase();
                 if (methodName && typeof this[methodName] === 'function') {
@@ -515,7 +542,7 @@ class UserInfo {
                         await this.sendVehicleStatusMqtt();
                     }
                 } else {
-                    $.DoubleLog(`❌未知的功能参数: ${feature}`);
+                    $.DoubleLog(`❌ ${getFormattedTimestamp()} 未知的功能参数: ${feature}`);
                     Notify = 1;
                 }
             }
@@ -542,12 +569,12 @@ class UserInfo {
                 // 只在首次刷新token时显示日志
                 if (this.firstTokenRefresh) {
                     const randomId = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
-                    $.DoubleLog(`✅接口调用成功: ${randomId}`);
+                    $.DoubleLog(`✅ ${getFormattedTimestamp()} 接口调用成功: ${randomId}`);
                     $.DoubleLog(`🆗刷新KEY:${result.data.centerTokenDto.refreshToken}`);
                     this.firstTokenRefresh = false; // 标记已经不是首次刷新了
                 }
             } else {
-                $.DoubleLog(`❌ ${result.message}`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} ${result.message}`);
                 this.ckStatus = false;
                 console.log(result);
                 Notify = 1;
@@ -573,16 +600,16 @@ class UserInfo {
             let result = await httpRequest(options);
 
             if (result.code == 0) {
-                if (showInfoLogs) $.DoubleLog(`✅获取车辆基本信息成功！`);
+                if (showInfoLogs) $.DoubleLog(`✅ ${getFormattedTimestamp()} 获取车辆基本信息成功！`);
                 // 显示原始返回信息
-                if (showInfoLogs) $.DoubleLog(`🔍车辆信息原始数据: ${JSON.stringify(result.data)}`);
+                if (showInfoLogs) $.DoubleLog(`🔍 ${getFormattedTimestamp()} 车辆信息原始数据: ${JSON.stringify(result.data)}`);
                 
                 if (result.data && result.data.length > 0) {
                     this.vehicleInfo = result.data[0];  // 保存车辆信息
                     
                     // 格式化显示车辆信息
                     if (showInfoLogs) {
-                        $.DoubleLog(`🚗车辆基本信息：`);
+                        $.DoubleLog(`🚗 ${getFormattedTimestamp()} 车辆基本信息：`);
                         for (const [key, value] of Object.entries(this.vehicleInfoNames)) {
                             if (this.vehicleInfo[key]) {
                                 $.DoubleLog(`  ${value.name}: ${this.vehicleInfo[key]}`);
@@ -590,11 +617,11 @@ class UserInfo {
                         }
                     }
                 } else {
-                    $.DoubleLog(`❌获取车辆信息失败，未找到车辆数据！`);
+                    $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取车辆信息失败，未找到车辆数据！`);
                     Notify = 1;
                 }
             } else {
-                $.DoubleLog(`❌获取车辆基本信息失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取车辆基本信息失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
             }
@@ -625,9 +652,9 @@ class UserInfo {
             let result = await httpRequest(options);
 
             if (result.code == 0) {
-                if (showInfoLogs) $.DoubleLog(`✅查询车辆状态成功！`);
+                if (showInfoLogs) $.DoubleLog(`✅ ${getFormattedTimestamp()} 查询车辆状态成功！`);
                 // 显示原始返回信息
-                if (showInfoLogs) $.DoubleLog(`🔍车辆状态原始数据: ${JSON.stringify(result.data)}`);
+                if (showInfoLogs) $.DoubleLog(`🔍 ${getFormattedTimestamp()} 车辆状态原始数据: ${JSON.stringify(result.data)}`);
                 
                 // 保存车辆状态信息
                 this.vehicleStatus = result.data;
@@ -647,7 +674,7 @@ class UserInfo {
                     }
                 }
             } else {
-                $.DoubleLog(`❌查询车辆状态失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 查询车辆状态失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
             }
@@ -682,16 +709,16 @@ class UserInfo {
             let result = await httpRequest(options);
 
             if (result.code == 0) {
-                if (showInfoLogs) $.DoubleLog(`✅查询车辆功能开关成功！`);
+                if (showInfoLogs) $.DoubleLog(`✅ ${getFormattedTimestamp()} 查询车辆功能开关成功！`);
                 // 显示原始返回信息
-                if (showInfoLogs) $.DoubleLog(`🔍功能开关原始数据: ${JSON.stringify(result.data)}`);
+                if (showInfoLogs) $.DoubleLog(`🔍 ${getFormattedTimestamp()} 功能开关原始数据: ${JSON.stringify(result.data)}`);
                 
                 // 保存所有功能开关状态
                 this.switchStatus = result.data;
                 
                 // 格式化显示功能开关状态
                 if (showInfoLogs) {
-                    $.DoubleLog(`📱功能开关状态：`);
+                    $.DoubleLog(`📱 ${getFormattedTimestamp()} 功能开关状态：`);
                     for (const [key, value] of Object.entries(result.data)) {
                         if (this.switchStatusNames[key]) {
                             const statusInfo = { ...this.switchStatusNames[key], ...commonStatus };
@@ -700,7 +727,7 @@ class UserInfo {
                     }
                 }
             } else {
-                $.DoubleLog(`❌查询车辆功能开关失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 查询车辆功能开关失败！`);
                 console.log("⚠️失败原因:",result);
                 Notify = 1;
             }
@@ -720,9 +747,9 @@ class UserInfo {
             // console.log(options);
             // console.log(result);
             if (result.code == 0) {
-                $.DoubleLog(`✅剩余积分: ${result.data.availablePoints}`);
+                $.DoubleLog(`✅ ${getFormattedTimestamp()} 剩余积分: ${result.data.availablePoints}`);
             } else {
-                $.DoubleLog(`❌剩余积分查询: 失败`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 剩余积分查询: 失败`);
                 console.log(result);
                 Notify = 1;
             }
@@ -745,13 +772,13 @@ class UserInfo {
 
             if (result.code == 0) {
                 if (result.data === true) {
-                    $.DoubleLog(`✅今日已经签到啦！`);
+                    $.DoubleLog(`✅ ${getFormattedTimestamp()} 今日已经签到啦！`);
                     return true;
                 } else {
                     return false;
                 }
             } else {
-                $.DoubleLog(`❌查询签到状态失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 查询签到状态失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
                 return false;
@@ -793,12 +820,12 @@ class UserInfo {
             
             // 检查返回结果
             if (result.code == 0) {
-                $.DoubleLog(`✅签到成功！`);
+                $.DoubleLog(`✅ ${getFormattedTimestamp()} 签到成功！`);
                 // 签到成功后查询积分
                 await this.points();
                 Notify = 1;
             } else {
-                $.DoubleLog(`❌签到失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 签到失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
             }
@@ -846,10 +873,10 @@ class UserInfo {
             let result = await httpRequest(options);
 
             if (result.code == 0) {
-                $.DoubleLog(`✅打开哨兵模式成功！`);
+                $.DoubleLog(`✅ ${getFormattedTimestamp()} 打开哨兵模式成功！`);
                 Notify = 1;
             } else {
-                $.DoubleLog(`❌打开哨兵模式失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 打开哨兵模式失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
             }
@@ -883,10 +910,10 @@ class UserInfo {
             let result = await httpRequest(options);
 
             if (result.code == 0) {
-                $.DoubleLog(`✅关闭哨兵模式成功！`);
+                $.DoubleLog(`✅ ${getFormattedTimestamp()} 关闭哨兵模式成功！`);
                 Notify = 1;
             } else {
-                $.DoubleLog(`❌关闭哨兵模式失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 关闭哨兵模式失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
             }
@@ -905,7 +932,7 @@ class UserInfo {
             }[action];
 
             if (!params) {
-                $.DoubleLog(`❌无效的车锁控制命令！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 无效的车锁控制命令！`);
                 return;
             }
 
@@ -936,7 +963,7 @@ class UserInfo {
                 $.DoubleLog(`✅${params.name}车锁成功！`);
                 Notify = 1;
             } else {
-                $.DoubleLog(`❌${params.name}车锁失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} ${params.name}车锁失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
             }
@@ -974,10 +1001,10 @@ class UserInfo {
             let result = await httpRequest(options);
 
             if (result.code == 0) {
-                $.DoubleLog(`✅闪灯鸣笛执行成功！`);
+                $.DoubleLog(`✅ ${getFormattedTimestamp()} 闪灯鸣笛执行成功！`);
                 Notify = 1;
             } else {
-                $.DoubleLog(`❌闪灯鸣笛执行失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 闪灯鸣笛执行失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
             }
@@ -1001,7 +1028,7 @@ class UserInfo {
             }[action];
 
             if (!params) {
-                $.DoubleLog(`❌无效的车窗控制命令！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 无效的车窗控制命令！`);
                 return;
             }
 
@@ -1031,7 +1058,7 @@ class UserInfo {
                 $.DoubleLog(`✅${params.name}执行成功！`);
                 Notify = 1;
             } else {
-                $.DoubleLog(`❌${params.name}执行失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} ${params.name}执行失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
             }
@@ -1065,7 +1092,7 @@ class UserInfo {
             }[action];
 
             if (!params) {
-                $.DoubleLog(`❌无效的净化控制命令！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 无效的净化控制命令！`);
                 return;
             }
 
@@ -1105,7 +1132,7 @@ class UserInfo {
                 $.DoubleLog(`✅${params.name}净化成功！`);
                 Notify = 1;
             } else {
-                $.DoubleLog(`❌${params.name}净化失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} ${params.name}净化失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
             }
@@ -1131,7 +1158,7 @@ class UserInfo {
             }[action];
 
             if (!params) {
-                $.DoubleLog(`❌无效的空调控制命令！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 无效的空调控制命令！`);
                 return;
             }
 
@@ -1174,7 +1201,7 @@ class UserInfo {
                 }
                 Notify = 1;
             } else {
-                $.DoubleLog(`❌${params.name}失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} ${params.name}失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
             }
@@ -1229,7 +1256,7 @@ class UserInfo {
             }[action];
 
             if (!params) {
-                $.DoubleLog(`❌无效的温度控制命令！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 无效的温度控制命令！`);
                 return;
             }
 
@@ -1274,7 +1301,7 @@ class UserInfo {
                 $.DoubleLog(`✅${params.name}成功！`);
                 Notify = 1;
             } else {
-                $.DoubleLog(`❌${params.name}失败！`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} ${params.name}失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
             }
@@ -1293,9 +1320,122 @@ class UserInfo {
         await this.controlTemperature('rapidcool');
     }
 
-    // 判断是否显示信息获取日志的函数
+    // 获取驻车图片函数
+    async photo() {
+        try {
+            // 准备请求体
+            const body = {
+                "clientType": 2,
+                "udid": null,
+                "vin": this.vehicleInfo.vin
+            };
+
+            // 使用getPostHeader生成请求头，注意这里使用的是vc域名的key
+            let options = {
+                url: `https://galaxy-vc.geely.com/vc/app/v1/sentinel/queryPhotoList`,
+                headers: this.getPostHeader(204373120, `/vc/app/v1/sentinel/queryPhotoList`, JSON.stringify(body)),
+                body: JSON.stringify(body)
+            };
+
+            // 执行查询图片列表请求
+            let result = await httpRequest(options);
+
+            if (result.code == 0 && result.data && result.data.photos && result.data.photos.length > 0) {
+                $.DoubleLog(`✅ ${getFormattedTimestamp()} 获取到${result.data.photos.length}张驻车图片`);
+                $.DoubleLog(`📸 拍摄时间: ${result.data.displayTime}`);
+
+                // 创建保存图片的目录
+                const fs = require('fs');
+                const path = require('path');
+                const https = require('https');
+                const http = require('http');
+
+                // 使用车架号创建目录
+                const photoDir = path.join(__dirname, 'parking_photos', this.vehicleInfo.vin);
+                if (!fs.existsSync(photoDir)) {
+                    fs.mkdirSync(photoDir, { recursive: true });
+                    $.DoubleLog(`📁 创建图片保存目录: ${photoDir}`);
+                }
+
+                // 下载每张图片
+                let downloadCount = 0;
+                let skipCount = 0;
+
+                for (const photo of result.data.photos) {
+                    if (photo.status === '0' && photo.url) {
+                        const fileName = photo.name;
+                        const filePath = path.join(photoDir, fileName);
+
+                        // 检查文件是否已存在
+                        if (fs.existsSync(filePath)) {
+                            $.DoubleLog(`⏭️  图片已存在，跳过: ${fileName}`);
+                            skipCount++;
+                            continue;
+                        }
+
+                        // 下载图片
+                        try {
+                            await this.downloadPhoto(photo.url, filePath);
+                            $.DoubleLog(`✅ 下载成功: ${fileName}`);
+                            downloadCount++;
+                        } catch (e) {
+                            $.DoubleLog(`❌ ${getFormattedTimestamp()} 下载失败 ${fileName}: ${e.message}`);
+                        }
+                    }
+                }
+
+                $.DoubleLog(`📊 下载完成! 新下载: ${downloadCount}张, 跳过: ${skipCount}张`);
+                $.DoubleLog(`💾 保存位置: ${photoDir}`);
+            } else if (result.code == 0 && result.data && result.data.photos && result.data.photos.length === 0) {
+                $.DoubleLog(`ℹ️ ${getFormattedTimestamp()} 当前没有驻车图片`);
+            } else {
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取驻车图片失败！`);
+                console.log("⚠️失败原因:", result);
+                Notify = 1;
+            }
+        } catch (e) {
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取驻车图片异常: ${e.message}`);
+            console.log(e);
+        }
+    }
+
+    // 下载图片的辅助函数
+    downloadPhoto(url, filePath) {
+        return new Promise((resolve, reject) => {
+            const fs = require('fs');
+            const https = require('https');
+            const http = require('http');
+
+            const protocol = url.startsWith('https') ? https : http;
+            const file = fs.createWriteStream(filePath);
+
+            protocol.get(url, (response) => {
+                if (response.statusCode !== 200) {
+                    reject(new Error(`HTTP ${response.statusCode}`));
+                    return;
+                }
+
+                response.pipe(file);
+
+                file.on('finish', () => {
+                    file.close();
+                    resolve();
+                });
+
+                file.on('error', (err) => {
+                    fs.unlink(filePath, () => {});
+                    reject(err);
+                });
+            }).on('error', (err) => {
+                fs.unlink(filePath, () => {});
+                reject(err);
+            });
+        });
+    }
+
+    // 判断是否显示信息获取日志的函数 (已废弃,由main函数直接处理)
     shouldShowInfoLogs(features) {
-        return (features.length === 0 || features.includes('info')) && !features.includes('mqtt');
+        return false;
     }
 
     // MQTT消息发送函数
@@ -1308,7 +1448,7 @@ class UserInfo {
             return new Promise((resolve, reject) => {
                 this.mqttClient.publish(topic, JSON.stringify(message), (err) => {
                     if (err) {
-                        $.DoubleLog(`❌MQTT消息发送失败: ${err.message}`);
+                        $.DoubleLog(`❌ ${getFormattedTimestamp()} MQTT消息发送失败: ${err.message}`);
                         reject(err);
                     } else {
                         //$.DoubleLog(`✅MQTT消息发送成功: ${topic}`);
@@ -1317,7 +1457,7 @@ class UserInfo {
                 });
             });
         } catch (e) {
-            $.DoubleLog(`❌MQTT错误: ${e.message}`);
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} MQTT错误: ${e.message}`);
             console.log(e);
         }
     }
@@ -1330,7 +1470,7 @@ class UserInfo {
         }
         try {
             if (!this.vehicleStatus) {
-                $.DoubleLog(`❌没有车辆状态数据可发送`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 没有车辆状态数据可发送`);
                 return;
             }
 
@@ -1778,7 +1918,7 @@ class UserInfo {
 
             // 删除成功日志，将由updateAndSendStatus统一输出
         } catch (e) {
-            $.DoubleLog(`❌发送车辆状态到MQTT失败: ${e.message}`);
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 发送车辆状态到MQTT失败: ${e.message}`);
             console.log(e);
         }
     }
@@ -1828,7 +1968,7 @@ class UserInfo {
                 topics.forEach(topic => {
                     this.mqttClient.subscribe(topic, (err) => {
                         if (err) {
-                            $.DoubleLog(`❌MQTT订阅失败: ${err.message}`);
+                            $.DoubleLog(`❌ ${getFormattedTimestamp()} MQTT订阅失败: ${err.message}`);
                         } else {
                             $.DoubleLog(`✅MQTT订阅成功: ${topic}`);
                         }
@@ -1848,7 +1988,7 @@ class UserInfo {
 
             // 错误处理
             this.mqttClient.on('error', (err) => {
-                $.DoubleLog(`❌MQTT连接错误: ${err.message}`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} MQTT连接错误: ${err.message}`);
             });
 
             // 断开连接处理
@@ -1950,7 +2090,7 @@ class UserInfo {
                     // 刷新token
                     await this.refresh_token();
                     if (!this.ckStatus) {
-                        $.DoubleLog(`❌账号CK失效，无法执行命令`);
+                        $.DoubleLog(`❌ ${getFormattedTimestamp()} 账号CK失效，无法执行命令`);
                         return;
                     }
 
@@ -2044,16 +2184,16 @@ class UserInfo {
                         // 更新并发送状态
                         await this.updateAndSendStatus();
                     } else {
-                        $.DoubleLog(`❌未知命令或状态: ${command} ${state}`);
+                        $.DoubleLog(`❌ ${getFormattedTimestamp()} 未知命令或状态: ${command} ${state}`);
                     }
                 } catch (e) {
-                    $.DoubleLog(`❌处理命令失败: ${e.message}`);
+                    $.DoubleLog(`❌ ${getFormattedTimestamp()} 处理命令失败: ${e.message}`);
                     console.log(e);
                 }
             });
 
         } catch (e) {
-            $.DoubleLog(`❌MQTT初始化失败: ${e.message}`);
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} MQTT初始化失败: ${e.message}`);
             console.log(e);
         }
     }
@@ -2084,7 +2224,7 @@ class UserInfo {
             if (!this.ckStatus) {
                 // 在输出错误信息前先换行，以免覆盖状态行
                 process.stdout.write('');
-                $.DoubleLog(`❌账号CK失效，无法更新状态`);
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 账号CK失效，无法更新状态`);
                 return;
             }
 
@@ -2094,12 +2234,12 @@ class UserInfo {
             await this.sendVehicleStatusMqtt();
             
             // 使用 process.stdout.write 和 '\r' 实现单行更新日志
-            const currentTime = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Shanghai', hour12: false }).replace(',', '').slice(0, 16).replace(/-/g, '/');
+            const currentTime = getFormattedTimestamp();
             process.stdout.write(`✅ ${currentTime} 车辆状态已更新并发送到MQTT\r`);
         } catch (e) {
             // 在输出错误信息前先换行，以免覆盖状态行
             process.stdout.write('');
-            $.DoubleLog(`❌获取车辆信息失败: ${e.message}`);
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取车辆信息失败: ${e.message}`);
             console.log(e);
         }
     }
@@ -2109,7 +2249,7 @@ class UserInfo {
     checkStatus(type) {
         const check = this.statusChecks[type];
         if (!check) {
-            $.DoubleLog(`❌未知的状态检测类型: ${type}`);
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 未知的状态检测类型: ${type}`);
             return false;
         }
         return check() ? 'ON' : 'OFF';
