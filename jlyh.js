@@ -27,6 +27,10 @@
  *    - jlyh.js sign 将只执行签到功能
  *    - jlyh.js opensentry 将执行打开哨兵功能
  *    - jlyh.js photo 将获取驻车图片
+ *    - jlyh.js startcharge 启动充电（默认第一个桩）
+ *    - jlyh.js stopcharge 停止充电（默认第一个桩）
+ *    - jlyh.js startcharge 70210159749 启动指定桩号充电
+ *    - jlyh.js stopcharge 70210159749 停止指定桩号充电
  *    - jlyh.js sign opensentry 将执行签到和哨兵功能
  
  * 3. 通知控制
@@ -64,10 +68,10 @@ function getFormattedTimestamp() {
 
 // MQTT配置
 const mqttConfig = {
-    host: 'mqtt://192.168.0.2', // MQTT服务器地址
+    host: 'mqtt://XXX.XXX.XXX.XXX', // MQTT服务器地址
     port: 1883,                 // MQTT服务器端口
-    username: '',               // MQTT用户名
-    password: '',               // MQTT密码
+    username: 'XXX',               // MQTT用户名
+    password: 'XXXXXXXXXX',               // MQTT密码
     clientId: 'jlyh_geely_galaxy', // 固定客户端ID
     updateInterval: 60         // MQTT状态更新间隔，单位：秒
 };
@@ -108,7 +112,9 @@ class UserInfo {
             'aconclose': '关闭空调',
             'rapidheat': '极速升温',
             'rapidcool': '极速降温',
-            'photo': '获取驻车图片'
+            'photo': '获取驻车图片',
+            'startcharge': '启动充电',
+            'stopcharge': '停止充电'
             // 如果要新增功能，在这里添加新功能的映射即可,不添加则会直接显示函数名
         };
         // 功能开关状态映射
@@ -211,6 +217,10 @@ class UserInfo {
             }
         };
         this.mqttClient = null; // 添加MQTT客户端实例变量
+        this.rechargeToken = ''; // 充电模块token
+        this.rechargeRefreshToken = ''; // 充电模块refreshToken
+        this.rechargeUserId = ''; // 充电模块用户ID
+        this.chargingPiles = []; // 充电桩列表
         
         // 添加状态检测映射
         this.statusChecks = {
@@ -272,6 +282,8 @@ class UserInfo {
             sercetKey = `NqYVmMgH5HXol8RB8RkOpl8iLCBakdRo`
         } else if (key == 204179735) {
             sercetKey = `UhmsX3xStU4vrGHGYtqEXahtkYuQncMf`
+        } else if (key == 204195485) {
+            sercetKey = `CqPwP83wzdjesmLeDuzK6SljsYN5PvRM`
         }
         // 生成 HMAC-SHA256 加密结果
         const hmacSha256 = crypto.createHmac('sha256', sercetKey);
@@ -327,6 +339,9 @@ class UserInfo {
         if (key == 204373120) {
             // vc域名使用这个签名头
             signatureHeaders = 'x-ca-appcode,x-ca-nonce,x-ca-timestamp,x-ca-key';
+        } else if (key == 204195485) {
+            // 充电模块
+            signatureHeaders = 'x-ca-key,x-ca-nonce,x-ca-timestamp';
         } else {
             // 其他域名使用这个签名头
             signatureHeaders = 'x-ca-nonce,x-ca-key,x-ca-timestamp';
@@ -334,7 +349,8 @@ class UserInfo {
 
         // Determine appcode based on key for signature calculation
         let appcode = key == 204373120 ? 'usp-gateway-code' : null;
-        let signature = this.calculateHmacSha256("POST", "application/json; charset=utf-8", content_md5, "application/json; charset=utf-8", formattedDate, key, uuid, timestamp, path, appcode)
+        let contentType = key == 204195485 ? "application/json; charset=UTF-8" : "application/json; charset=utf-8";
+        let signature = this.calculateHmacSha256("POST", "application/json; charset=utf-8", content_md5, contentType, formattedDate, key, uuid, timestamp, path, appcode)
         let headers = {
             'date': formattedDate,
             'x-ca-signature': signature,
@@ -359,7 +375,7 @@ class UserInfo {
             'sweet_security_info': '{"appVersion":"1.27.0","platform":"android"}' ,
             'methodtype': '6',
             'contenttype': 'application/json',
-            'Content-Type': 'application/json; charset=utf-8',
+            'Content-Type': contentType,
            'Content-Length': '87',
             'Connection': 'Keep-Alive',
             'Accept-Encoding': 'gzip',
@@ -379,6 +395,22 @@ class UserInfo {
             headers["usetoken"] = 1
             headers["host"] = `galaxy-vc.geely.com`
             headers["x-refresh-token"] = true
+        } else if (key == 204195485) {
+            // 充电模块
+            headers["host"] = `api-recharge.geely.com`
+            headers["channelid"] = "01701001"
+            headers["token"] = this.rechargeToken || ''
+            delete headers["x-ca-appcode"]
+            delete headers["x-refresh-token"]
+            delete headers["sweet_security_info"]
+            delete headers["methodtype"]
+            delete headers["contenttype"]
+            delete headers["appId"]
+            delete headers["appVersion"]
+            delete headers["platform"]
+            delete headers["deviceSN"]
+            delete headers["txCookie"]
+            delete headers["Content-Length"]
         } else {
             // h5端
             headers["usetoken"] = 1
@@ -433,6 +465,18 @@ class UserInfo {
             delete headers["x-refresh-token"]
             headers["taenantid"] = 569001701001
             headers["svcsid"] = ""
+        } else if (key == 204195485) {
+            // 充电模块
+            headers["host"] = `api-recharge.geely.com`
+            headers["channelid"] = "01701001"
+            headers["token"] = this.rechargeToken || ''
+            headers["x-ca-signature-headers"] = 'x-ca-key,x-ca-nonce,x-ca-timestamp'
+            delete headers["x-refresh-token"]
+            delete headers["appId"]
+            delete headers["appVersion"]
+            delete headers["platform"]
+            delete headers["deviceSN"]
+            delete headers["txCookie"]
         } else {
             headers["usetoken"] = 1
             headers["host"] = `galaxy-app.geely.com`
@@ -533,9 +577,19 @@ class UserInfo {
             }
         } else {
             $.DoubleLog(`🔄 ${getFormattedTimestamp()} 正在执行功能...`);
-            for (const feature of features) {
+            for (let i = 0; i < features.length; i++) {
+                const feature = features[i];
                 const methodName = feature.toLowerCase();
-                if (methodName && typeof this[methodName] === 'function') {
+                // 充电桩命令支持追加桩号参数
+                if ((methodName === 'startcharge' || methodName === 'stopcharge') && typeof this[methodName] === 'function') {
+                    // 下一个参数如果不是已知功能名，则视为充电桩ID
+                    let pileId = null;
+                    if (i + 1 < features.length && !this.featureNames[features[i + 1].toLowerCase()] && typeof this[features[i + 1].toLowerCase()] !== 'function') {
+                        pileId = features[i + 1];
+                        i++; // 跳过桩号参数
+                    }
+                    await this[methodName](pileId);
+                } else if (methodName && typeof this[methodName] === 'function') {
                     await this[methodName]();
                     // 只在MQTT启用且执行特定功能时发送状态
                     if ((defaultEnableMqtt || features.includes('mqtt')) && ['controlstatus', 'info'].includes(methodName)) {
@@ -1433,6 +1487,296 @@ class UserInfo {
         });
     }
 
+    // *********************************************************
+    // 充电桩管理类函数
+
+    // 对URL path中的query参数按字母序排列（阿里云API网关签名要求）
+    sortQueryParams(path) {
+        const idx = path.indexOf('?');
+        if (idx === -1) return path;
+        const basePath = path.substring(0, idx);
+        const query = path.substring(idx + 1);
+        const sorted = query.split('&').sort().join('&');
+        return `${basePath}?${sorted}`;
+    }
+
+    // 获取充电模块授权码
+    async getRechargeAuthCode() {
+        try {
+            const urlPath = `/api/v1/oauth2/code?scope=snsapiUserinfo&response_type=code&isDestruction=false&state=1&client_id=30000023`;
+            // 签名时query参数需要按字母序排列
+            const signPath = this.sortQueryParams(urlPath);
+            const key = 204179735;
+
+            let currentDate = new Date();
+            let formattedDate = this.formatDate(currentDate, 0);
+            let parts = formattedDate.split(" ");
+            formattedDate = `${parts[0]}, ${parts[2]} ${parts[1]} ${parts[3]} ${parts[4]} GMT`;
+            let timestamp = new Date(formattedDate).getTime();
+            let uuid = this.generateUUID();
+
+            // appcode参与签名
+            let signature = this.calculateHmacSha256("GET", "application/json; charset=utf-8", "", "application/x-www-form-urlencoded; charset=utf-8", formattedDate, key, uuid, timestamp, signPath, 'galaxy-app-user');
+
+            // 复用getGetHeader的基础headers结构
+            let headers = this.getGetHeader(key, urlPath);
+            // 覆盖签名相关字段
+            headers['date'] = formattedDate;
+            headers['x-ca-signature'] = signature;
+            headers['x-ca-appcode'] = 'galaxy-app-user';
+            headers['x-ca-nonce'] = uuid;
+            headers['x-ca-timestamp'] = timestamp;
+            headers['x-ca-signature-headers'] = 'x-ca-appcode,x-ca-nonce,x-ca-key,x-ca-timestamp';
+
+            let options = {
+                url: `https://galaxy-user-api.geely.com${urlPath}`,
+                headers: headers,
+            };
+            let result = await httpRequest(options);
+            if (result && result.code == 'success' && result.data && result.data.code) {
+                return result.data.code;
+            } else {
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取充电授权码失败: ${JSON.stringify(result)}`);
+                return null;
+            }
+        } catch (e) {
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取充电授权码异常: ${e.message}`);
+            return null;
+        }
+    }
+
+    // 用授权码换取充电模块token
+    async getRechargeToken() {
+        try {
+            const code = await this.getRechargeAuthCode();
+            if (!code) return false;
+
+            let options = {
+                url: `https://api-recharge.geely.com/login/auth-token?code=${code}`,
+                headers: this.getGetHeader(204195485, `/login/auth-token?code=${code}`),
+            };
+            let result = await httpRequest(options);
+            if (result.code == 1 && result.data && result.data.length > 0) {
+                this.rechargeToken = result.data[0].authToken;
+                this.rechargeRefreshToken = result.data[0].authRefreshToken;
+                $.DoubleLog(`✅ ${getFormattedTimestamp()} 充电模块认证成功`);
+                return true;
+            } else {
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 充电模块认证失败: ${JSON.stringify(result)}`);
+                return false;
+            }
+        } catch (e) {
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 充电模块认证异常: ${e.message}`);
+            return false;
+        }
+    }
+
+    // 确保充电模块已认证
+    async ensureRechargeAuth() {
+        if (!this.rechargeToken) {
+            return await this.getRechargeToken();
+        }
+        return true;
+    }
+
+    // 获取充电桩列表
+    async getMyPilings() {
+        try {
+            if (!await this.ensureRechargeAuth()) return [];
+
+            const body = { "userId": this.rechargeUserId || "6087291036483257512" };
+            let options = {
+                url: `https://api-recharge.geely.com/app/hcharger/getMyPilingsNew`,
+                headers: this.getPostHeader(204195485, `/app/hcharger/getMyPilingsNew`, JSON.stringify(body)),
+                body: JSON.stringify(body)
+            };
+            let result = await httpRequest(options);
+            if (result.code == 1 && result.data) {
+                const isFirstLoad = this.chargingPiles.length === 0;
+                this.chargingPiles = result.data;
+                if (isFirstLoad || showInfoLogs) {
+                    $.DoubleLog(`✅ ${getFormattedTimestamp()} 获取充电桩列表成功，共${result.data.length}个桩`);
+                    for (const pile of result.data) {
+                        const statusText = pile.status === 0 ? '空闲' : pile.status === 1 ? '已连接' : pile.status === 2 ? '充电中' : pile.status === 4 ? '等待充电' : `状态${pile.status}`;
+                        $.DoubleLog(`  🔌 ${pile.name || pile.pilingsCode}: ${statusText} ${pile.isOnline === 1 ? '(在线)' : '(离线)'}`);
+                    }
+                }
+                return result.data;
+            } else {
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取充电桩列表失败: ${JSON.stringify(result)}`);
+                return [];
+            }
+        } catch (e) {
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取充电桩列表异常: ${e.message}`);
+            return [];
+        }
+    }
+
+    // 获取充电桩详情
+    async getPilingDetail(pilingsCode) {
+        try {
+            if (!await this.ensureRechargeAuth()) return null;
+
+            const body = { "pilingsCode": pilingsCode };
+            let options = {
+                url: `https://api-recharge.geely.com/app/hcharger/getPlingsDetailNew`,
+                headers: this.getPostHeader(204195485, `/app/hcharger/getPlingsDetailNew`, JSON.stringify(body)),
+                body: JSON.stringify(body)
+            };
+            let result = await httpRequest(options);
+            if (result.code == 1 && result.data && result.data.length > 0) {
+                return result.data[0];
+            } else {
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取充电桩详情失败: ${JSON.stringify(result)}`);
+                return null;
+            }
+        } catch (e) {
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取充电桩详情异常: ${e.message}`);
+            return null;
+        }
+    }
+
+    // 充电预检
+    async chargePreCheck(pilingsCode, type = "0") {
+        try {
+            if (!await this.ensureRechargeAuth()) return { ok: false, reqId: '' };
+
+            const body = { "type": type, "pilingsCode": pilingsCode };
+            let options = {
+                url: `https://api-recharge.geely.com/app/hcharger/chargePreCheck`,
+                headers: this.getPostHeader(204195485, `/app/hcharger/chargePreCheck`, JSON.stringify(body)),
+                body: JSON.stringify(body)
+            };
+            let result = await httpRequest(options);
+            const actionText = type === "0" ? '启动' : '停止';
+            if (result.code == 1 && result.model) {
+                if (result.model.code === "0") {
+                    $.DoubleLog(`✅ ${getFormattedTimestamp()} 充电预检通过 (${actionText}) ${result.model.msg || ''}`);
+                    return { ok: true, reqId: result.model.reqId || '' };
+                } else {
+                    $.DoubleLog(`❌ ${getFormattedTimestamp()} 充电预检不通过 (${actionText}): ${result.model.msg || '未知原因'} [code:${result.model.code}]`);
+                    return { ok: false, reqId: '' };
+                }
+            } else {
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 充电预检失败: ${result.message || JSON.stringify(result)}`);
+                return { ok: false, reqId: '' };
+            }
+        } catch (e) {
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 充电预检异常: ${e.message}`);
+            return { ok: false, reqId: '' };
+        }
+    }
+
+    // 启动/停止充电 type: "0"=启动, "1"=停止
+    async doCharge(pilingsCode, type = "0") {
+        try {
+            if (!await this.ensureRechargeAuth()) return false;
+
+            // 先预检
+            const preCheck = await this.chargePreCheck(pilingsCode, type);
+            if (!preCheck.ok) return false;
+
+            const body = { "type": type, "pilingsCode": pilingsCode, "reqId": preCheck.reqId };
+            let options = {
+                url: `https://api-recharge.geely.com/app/hcharger/startCharge`,
+                headers: this.getPostHeader(204195485, `/app/hcharger/startCharge`, JSON.stringify(body)),
+                body: JSON.stringify(body)
+            };
+            let result = await httpRequest(options);
+            const actionText = type === "0" ? '启动充电' : '停止充电';
+            if (result.code == 1) {
+                if (result.model) {
+                    $.DoubleLog(`✅ ${getFormattedTimestamp()} ${actionText}成功！桩号: ${pilingsCode} 序列号: ${result.model.startChargeSeq || '-'}`);
+                } else {
+                    $.DoubleLog(`✅ ${getFormattedTimestamp()} ${actionText}成功！桩号: ${pilingsCode}`);
+                }
+                Notify = 1;
+                return true;
+            } else {
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} ${actionText}失败: ${result.message || JSON.stringify(result)}`);
+                return false;
+            }
+        } catch (e) {
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 充电操作异常: ${e.message}`);
+            return false;
+        }
+    }
+
+    // 获取充电实时数据
+    async getChargingData(equipmentId) {
+        try {
+            if (!await this.ensureRechargeAuth()) return null;
+
+            const body = { "equipmentId": equipmentId };
+            let options = {
+                url: `https://api-recharge.geely.com/app/hcharger/getChargingData`,
+                headers: this.getPostHeader(204195485, `/app/hcharger/getChargingData`, JSON.stringify(body)),
+                body: JSON.stringify(body)
+            };
+            let result = await httpRequest(options);
+            if (result.code == 1 && result.model) {
+                return result.model;
+            } else {
+                return null;
+            }
+        } catch (e) {
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取充电数据异常: ${e.message}`);
+            return null;
+        }
+    }
+
+    // 获取充电桩pilingsCode，支持指定ID或默认第一个
+    async resolvePileCode(pileId) {
+        if (this.chargingPiles.length === 0) {
+            await this.getMyPilings();
+        }
+        if (this.chargingPiles.length === 0) {
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 没有找到充电桩`);
+            return null;
+        }
+        if (pileId) {
+            const found = this.chargingPiles.find(p => p.pilingsCode === pileId);
+            if (found) return found.pilingsCode;
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 未找到充电桩: ${pileId}`);
+            return null;
+        }
+        return this.chargingPiles[0].pilingsCode;
+    }
+
+    // 启动充电（命令行/MQTT入口）
+    async startcharge(pileId) {
+        await this.refresh_token();
+        const code = await this.resolvePileCode(pileId);
+        if (!code) return;
+        await this.doCharge(code, "0");
+    }
+
+    // 停止充电（命令行/MQTT入口）
+    async stopcharge(pileId) {
+        await this.refresh_token();
+        const code = await this.resolvePileCode(pileId);
+        if (!code) return;
+        await this.doCharge(code, "1");
+    }
+
+    // 获取充电模块用户ID
+    async getRechargeUserInfo() {
+        try {
+            if (!await this.ensureRechargeAuth()) return;
+
+            let options = {
+                url: `https://api-recharge.geely.com/login/userinfo`,
+                headers: this.getGetHeader(204195485, `/login/userinfo`),
+            };
+            let result = await httpRequest(options);
+            if (result.code == 1 && result.data && result.data.length > 0) {
+                this.rechargeUserId = result.data[0].userId;
+            }
+        } catch (e) {
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取充电用户信息异常: ${e.message}`);
+        }
+    }
+
     // 判断是否显示信息获取日志的函数 (已废弃,由main函数直接处理)
     shouldShowInfoLogs(features) {
         return false;
@@ -1916,9 +2260,138 @@ class UserInfo {
                 await this.sendMqttMessage(configTopic, config);
             }
 
+            // 发送充电桩状态到MQTT
+            await this.sendChargingPileStatusMqtt();
+
             // 删除成功日志，将由updateAndSendStatus统一输出
         } catch (e) {
             $.DoubleLog(`❌ ${getFormattedTimestamp()} 发送车辆状态到MQTT失败: ${e.message}`);
+            console.log(e);
+        }
+    }
+
+    // 发送充电桩状态到MQTT
+    async sendChargingPileStatusMqtt() {
+        try {
+            // 确保充电模块已认证
+            if (!await this.ensureRechargeAuth()) return;
+
+            // 获取用户ID
+            if (!this.rechargeUserId) {
+                await this.getRechargeUserInfo();
+            }
+
+            // 获取充电桩列表
+            const piles = await this.getMyPilings();
+            if (!piles || piles.length === 0) return;
+
+            for (const pile of piles) {
+                const pileCode = pile.pilingsCode;
+                const detail = await this.getPilingDetail(pileCode);
+                if (!detail) continue;
+
+                // 获取充电实时数据（仅充电中时有意义）
+                let chargingData = null;
+                if (detail.status === 2) {
+                    chargingData = await this.getChargingData(pileCode);
+                }
+
+                const statusMap = { 0: '空闲', 1: '已连接', 2: '充电中', 3: '故障', 4: '等待充电' };
+                const isCharging = detail.status === 2;
+
+                // 充电桩状态数据
+                const pileStateData = {
+                    status: statusMap[detail.status] || `未知(${detail.status})`,
+                    status_code: detail.status,
+                    is_online: detail.isOnline === 1 ? 'ON' : 'OFF',
+                    is_charging: isCharging ? 'ON' : 'OFF',
+                    voltage: chargingData ? chargingData.voltageA : 0,
+                    current: chargingData ? chargingData.currentA : 0,
+                    power: chargingData ? parseFloat((chargingData.voltageA * chargingData.currentA / 1000).toFixed(2)) : 0,
+                    total_kwh: chargingData ? chargingData.lastChargeTotalPower : 0,
+                    charge_hours: chargingData ? chargingData.lastChargeHours : 0,
+                    pile_name: detail.name || pileCode
+                };
+
+                // 发送状态
+                const stateTopic = `homeassistant/sensor/geely_pile_${pileCode}/state`;
+                await this.sendMqttMessage(stateTopic, pileStateData);
+
+                // 传感器配置
+                const pileSensorConfigs = {
+                    status: {
+                        name: `充电桩状态`,
+                        value_template: "{{ value_json.status }}",
+                        icon: "mdi:ev-station",
+                    },
+                    voltage: {
+                        name: `充电电压`,
+                        value_template: "{{ value_json.voltage }}",
+                        unit_of_measurement: "V",
+                        icon: "mdi:flash",
+                    },
+                    current: {
+                        name: `充电电流`,
+                        value_template: "{{ value_json.current }}",
+                        unit_of_measurement: "A",
+                        icon: "mdi:current-ac",
+                    },
+                    power: {
+                        name: `充电功率`,
+                        value_template: "{{ value_json.power }}",
+                        unit_of_measurement: "kW",
+                        icon: "mdi:lightning-bolt",
+                    },
+                    total_kwh: {
+                        name: `本次充电量`,
+                        value_template: "{{ value_json.total_kwh }}",
+                        unit_of_measurement: "kWh",
+                        icon: "mdi:battery-charging",
+                    },
+                    charge_hours: {
+                        name: `充电时长`,
+                        value_template: "{{ value_json.charge_hours }}",
+                        unit_of_measurement: "h",
+                        icon: "mdi:timer",
+                    }
+                };
+
+                const device = {
+                    identifiers: [`geely_pile_${pileCode}`],
+                    name: `充电桩 ${detail.name || pileCode}`,
+                    model: pileCode,
+                    manufacturer: "Geely"
+                };
+
+                // 发送传感器配置
+                for (const [sensorName, config] of Object.entries(pileSensorConfigs)) {
+                    const configTopic = `homeassistant/sensor/geely_pile_${pileCode}/${sensorName}/config`;
+                    await this.sendMqttMessage(configTopic, {
+                        ...config,
+                        state_topic: stateTopic,
+                        unique_id: `geely_pile_${pileCode}_${sensorName}`,
+                        device: sensorName === 'status' ? device : { identifiers: [`geely_pile_${pileCode}`] }
+                    });
+                }
+
+                // 充电开关配置
+                const switchConfigTopic = `homeassistant/switch/geely_pile_${pileCode}/charging/config`;
+                await this.sendMqttMessage(switchConfigTopic, {
+                    name: `充电开关`,
+                    command_topic: `homeassistant/switch/geely_pile_${pileCode}/charging/set`,
+                    state_topic: stateTopic,
+                    value_template: "{{ value_json.is_charging }}",
+                    payload_on: "ON",
+                    payload_off: "OFF",
+                    state_on: "ON",
+                    state_off: "OFF",
+                    icon: "mdi:ev-plug-type2",
+                    unique_id: `geely_pile_${pileCode}_charging`,
+                    device: { identifiers: [`geely_pile_${pileCode}`] }
+                });
+            }
+        } catch (e) {
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 发送充电桩状态到MQTT失败: ${e.message}`);
             console.log(e);
         }
     }
@@ -1962,7 +2435,8 @@ class UserInfo {
                 const topics = [
                     `homeassistant/switch/geely_${this.vehicleInfo.vin}/+/set`,
                     `homeassistant/button/geely_${this.vehicleInfo.vin}/+/press`,
-                    `homeassistant/number/geely_${this.vehicleInfo.vin}/ac_temp/set`
+                    `homeassistant/number/geely_${this.vehicleInfo.vin}/ac_temp/set`,
+                    `homeassistant/switch/+/charging/set`
                 ];
                 
                 topics.forEach(topic => {
@@ -2016,6 +2490,23 @@ class UserInfo {
                     const command = topicParts[3];     // 命令类型
                     const action = topicParts[4];      // 'set' 或 'press'
                     const state = message.toString();
+
+                    // 处理充电桩开关命令
+                    if (topic.startsWith('homeassistant/switch/geely_pile_') && topic.endsWith('/charging/set')) {
+                        const pileCode = topic.split('/')[2].replace('geely_pile_', '');
+                        await this.refresh_token();
+                        if (state === 'ON') {
+                            $.DoubleLog(`🔌 ${getFormattedTimestamp()} 正在启动充电: ${pileCode}`);
+                            await this.doCharge(pileCode, "0");
+                        } else {
+                            $.DoubleLog(`🔌 ${getFormattedTimestamp()} 正在停止充电: ${pileCode}`);
+                            await this.doCharge(pileCode, "1");
+                        }
+                        // 等待状态更新
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        await this.sendChargingPileStatusMqtt();
+                        return;
+                    }
 
                     // 处理温度设置
                     if (deviceType === 'number' && command === 'ac_temp' && action === 'set') {
