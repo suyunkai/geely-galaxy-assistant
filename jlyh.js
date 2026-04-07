@@ -8,11 +8,12 @@
  * 使用方法：
  * 1. 在青龙面板中添加环境变量：
  *    - 变量名：jlyh
- *    - 变量值："抓域名https://galaxy-user-api.geely.com/api/v1/login/refresh?refreshToken=后面的值"&请求头headers中deviceSN的值
- *    - 抓不到这个域名抓短信登录包 https://galaxy-user-api.geely.com/api/v1/login/mobileCodeLogin 返回体中的refreshToken的值，同样后面带着&请求头headers中deviceSN的值
+ *    - 变量值："用1.26.1老版本app，抓短信验证码登录的包
+ *    - https://galaxy-user-api.geely.com/api/v1/login/mobileCodeLogin响应体里的：refreshToken、hardwareDeviceId
+ *    - 需注意！抓包时候先不要打开抓包，先拿到短信验证码，点击登录的前一刻打开抓包，这样才能抓到，否则会请求错误
  *    - 注意我说的是值 并不是全部 填错的自己看着点
- *    - 并且变量是两个值 两个值 两个值 一个refreshToke的值一个header请求头中的deviceSN的值。变量值格式是：refreshToke的值&deviceSN的值
- * 请注意：吉利银河app异地登录会顶下去，每次重新登录都要重新抓包。抓包教程自己找，安卓实测不需要根证书，用户证书也能抓，可能要配合PC端Reqable。
+ *    - 变量值格式是：refreshToke的值&hardwareDeviceId的值（只填写值，中间用&连接）
+ * 请注意：吉利银河app异地登录会顶下去，每次重新登录都要重新抓包。抓包教程自己找，安卓1.26.1版本app实测不需要根证书，用户证书也能抓，可能要配合PC端Reqable。
 
  * 2. 在青龙面板中添加定时任务：
  *    - 名称：jlyh
@@ -68,10 +69,10 @@ function getFormattedTimestamp() {
 
 // MQTT配置
 const mqttConfig = {
-    host: 'mqtt://XXX.XXX.XXX.XXX', // MQTT服务器地址
+    host: 'mqtt://', // MQTT服务器地址
     port: 1883,                 // MQTT服务器端口
-    username: 'XXX',               // MQTT用户名
-    password: 'XXXXXXXXXX',               // MQTT密码
+    username: 'XXXXX',               // MQTT用户名
+    password: 'XXXXX',               // MQTT密码
     clientId: 'jlyh_geely_galaxy', // 固定客户端ID
     updateInterval: 60         // MQTT状态更新间隔，单位：秒
 };
@@ -114,7 +115,9 @@ class UserInfo {
             'rapidcool': '极速降温',
             'photo': '获取驻车图片',
             'startcharge': '启动充电',
-            'stopcharge': '停止充电'
+            'stopcharge': '停止充电',
+            'capability': '车辆能力查询',
+            'deviceinfo': '车机设备信息'
             // 如果要新增功能，在这里添加新功能的映射即可,不添加则会直接显示函数名
         };
         // 功能开关状态映射
@@ -219,6 +222,7 @@ class UserInfo {
         this.mqttClient = null; // 添加MQTT客户端实例变量
         this.rechargeToken = ''; // 充电模块token
         this.rechargeRefreshToken = ''; // 充电模块refreshToken
+        this.rechargeTokenExpiry = 0; // 充电模块token过期时间戳
         this.rechargeUserId = ''; // 充电模块用户ID
         this.chargingPiles = []; // 充电桩列表
         
@@ -559,6 +563,7 @@ class UserInfo {
         await this.mylist();        // 获取车辆信息
         await this.controlstatus(); // 获取车辆状态信息
         await this.switchstatus();  // 获取车辆功能开关信息
+        await this.getLastSoc();    // 获取最新SOC电量
     }
 
     // 执行功能
@@ -784,6 +789,103 @@ class UserInfo {
                 $.DoubleLog(`❌ ${getFormattedTimestamp()} 查询车辆功能开关失败！`);
                 console.log("⚠️失败原因:",result);
                 Notify = 1;
+            }
+        } catch (e) {
+            console.log(e);
+        }
+    }
+
+    // 查询车辆能力列表
+    async capability() {
+        try {
+            const body = {
+                "clientType": 2,
+                "vin": this.vehicleInfo.vin
+            };
+            let options = {
+                url: `https://galaxy-vc.geely.com/vc/app/v1/vehicle/control/capability`,
+                headers: this.getPostHeader(204373120, `/vc/app/v1/vehicle/control/capability`, JSON.stringify(body)),
+                body: JSON.stringify(body)
+            };
+            let result = await httpRequest(options);
+            if (result.code == 0 && result.data) {
+                this.vehicleCapability = result.data;
+                $.DoubleLog(`✅ ${getFormattedTimestamp()} 查询车辆能力成功！`);
+                if (result.data.baseList) {
+                    $.DoubleLog(`📱 支持功能：共${result.data.baseList.length}项`);
+                    for (const item of result.data.baseList) {
+                        if (item.isVisible === '1') {
+                            $.DoubleLog(`  ${item.functionName || item.functionId}: ${item.isSubscribe === '1' ? '已订阅' : '未订阅'}`);
+                        }
+                    }
+                }
+            } else {
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 查询车辆能力失败！`);
+            }
+        } catch (e) {
+            console.log(e);
+        }
+    }
+
+    // 获取最新SOC电量（比control/status更实时）
+    async getLastSoc() {
+        try {
+            const body = {
+                "clientType": 2,
+                "password": null,
+                "platform": "2.0",
+                "sourceType": 1,
+                "type": null,
+                "udId": null,
+                "vin": this.vehicleInfo.vin
+            };
+            let options = {
+                url: `https://galaxy-vc.geely.com/vc/app/v1/reservation/getLastSoc`,
+                headers: this.getPostHeader(204373120, `/vc/app/v1/reservation/getLastSoc`, JSON.stringify(body)),
+                body: JSON.stringify(body)
+            };
+            let result = await httpRequest(options);
+            if (result.code == 0 && result.data) {
+                this.lastSoc = result.data.targetSOCVal;
+                if (showInfoLogs) {
+                    $.DoubleLog(`✅ ${getFormattedTimestamp()} 最新SOC: ${result.data.targetSOCVal}%`);
+                }
+                return result.data.targetSOCVal;
+            } else {
+                if (showInfoLogs) $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取SOC失败！`);
+                return null;
+            }
+        } catch (e) {
+            console.log(e);
+            return null;
+        }
+    }
+
+    // 获取车机设备信息
+    async deviceinfo() {
+        try {
+            const body = {
+                "carSeriesCode": this.vehicleInfo.seriesCode || "E245",
+                "brandCode": "GALAXY"
+            };
+            let options = {
+                url: `https://galaxy-vc.geely.com/vc/api/v1/carAdapter/getDeviceInfo`,
+                headers: this.getPostHeader(204373120, `/vc/api/v1/carAdapter/getDeviceInfo`, JSON.stringify(body)),
+                body: JSON.stringify(body)
+            };
+            let result = await httpRequest(options);
+            if (result.code == 0 && result.data) {
+                this.deviceInfo = result.data;
+                $.DoubleLog(`✅ ${getFormattedTimestamp()} 车机设备信息：`);
+                for (const device of result.data) {
+                    $.DoubleLog(`  设备型号: ${device.deviceModel}`);
+                    $.DoubleLog(`  WiFi名称: ${device.wifiName}`);
+                    $.DoubleLog(`  WiFi密码: ${device.wifiPwd}`);
+                    $.DoubleLog(`  固件版本: ${device.version}`);
+                }
+            } else {
+                $.DoubleLog(`❌ ${getFormattedTimestamp()} 获取车机设备信息失败！`);
+                console.log("⚠️失败原因:", result);
             }
         } catch (e) {
             console.log(e);
@@ -1559,6 +1661,8 @@ class UserInfo {
             if (result.code == 1 && result.data && result.data.length > 0) {
                 this.rechargeToken = result.data[0].authToken;
                 this.rechargeRefreshToken = result.data[0].authRefreshToken;
+                // token有效期约1799秒(30分钟)，提前60秒刷新
+                this.rechargeTokenExpiry = Date.now() + (parseInt(result.data[0].expireAt) - 60) * 1000;
                 $.DoubleLog(`✅ ${getFormattedTimestamp()} 充电模块认证成功`);
                 return true;
             } else {
@@ -1571,7 +1675,7 @@ class UserInfo {
         }
     }
 
-    // 确保充电模块已认证
+    // 确保充电模块已认证（每次状态更新周期都刷新）
     async ensureRechargeAuth() {
         if (!this.rechargeToken) {
             return await this.getRechargeToken();
@@ -1579,12 +1683,21 @@ class UserInfo {
         return true;
     }
 
+    // 刷新充电模块token（在定时更新中调用）
+    async refreshRechargeToken() {
+        this.rechargeToken = '';
+        return await this.getRechargeToken();
+    }
+
     // 获取充电桩列表
     async getMyPilings() {
         try {
             if (!await this.ensureRechargeAuth()) return [];
 
-            const body = { "userId": this.rechargeUserId || "6087291036483257512" };
+            if (!this.rechargeUserId) {
+                await this.getRechargeUserInfo();
+            }
+            const body = { "userId": this.rechargeUserId };
             let options = {
                 url: `https://api-recharge.geely.com/app/hcharger/getMyPilingsNew`,
                 headers: this.getPostHeader(204195485, `/app/hcharger/getMyPilingsNew`, JSON.stringify(body)),
@@ -1849,7 +1962,9 @@ class UserInfo {
                 
                 // 添加电机状态和后备箱锁状态
                 engine_status: this.vehicleStatus.vehicleEngineStatus?.engineStatus,
-                trunk_lock_status: this.vehicleStatus.vehicleDoorCoverStatus?.trunkLockStatus
+                trunk_lock_status: this.vehicleStatus.vehicleDoorCoverStatus?.trunkLockStatus,
+                // 最新SOC目标电量
+                target_soc: this.lastSoc || null
             };
 
             // 保存最后的传感器数据用于后续更新
@@ -2048,6 +2163,17 @@ class UserInfo {
                     state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
                     value_template: "{{ value_json.trunk_lock_status }}",
                     unique_id: `geely_${this.vehicleInfo.vin}_trunk_lock_status`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                target_soc: {
+                    name: "目标SOC",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.target_soc }}",
+                    unit_of_measurement: "%",
+                    icon: "mdi:battery-charging-high",
+                    unique_id: `geely_${this.vehicleInfo.vin}_target_soc`,
                     device: {
                         identifiers: [`geely_${this.vehicleInfo.vin}`]
                     }
@@ -2273,15 +2399,7 @@ class UserInfo {
     // 发送充电桩状态到MQTT
     async sendChargingPileStatusMqtt() {
         try {
-            // 确保充电模块已认证
-            if (!await this.ensureRechargeAuth()) return;
-
-            // 获取用户ID
-            if (!this.rechargeUserId) {
-                await this.getRechargeUserInfo();
-            }
-
-            // 获取充电桩列表
+            // 获取充电桩列表（内部会自动认证和获取userId）
             const piles = await this.getMyPilings();
             if (!piles || piles.length === 0) return;
 
@@ -2713,11 +2831,12 @@ class UserInfo {
             // 刷新token
             await this.refresh_token();
             if (!this.ckStatus) {
-                // 在输出错误信息前先换行，以免覆盖状态行
                 process.stdout.write('');
                 $.DoubleLog(`❌ ${getFormattedTimestamp()} 账号CK失效，无法更新状态`);
                 return;
             }
+            // 同步刷新充电模块token
+            await this.refreshRechargeToken();
 
             // 获取车辆各种信息
             await this.getVehicleInfo();
